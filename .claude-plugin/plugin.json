@@ -1,0 +1,15 @@
+{
+  "name": "pr-watcher",
+  "version": "0.1.0",
+  "description": "A pane that watches your open pull requests, your review requests and any PR you add by hand.",
+  "author": { "name": "Gergely Brautigam" },
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "pollSeconds": {
+      "type": "number",
+      "title": "Poll interval (seconds)",
+      "description": "How often the pane asks GitHub for fresh data. 10 at least.",
+      "default": 30
+    }
+  }
+}

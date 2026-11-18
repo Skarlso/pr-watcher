@@ -1,0 +1,6 @@
+{
+  "name": "pr-watcher",
+  "description": "A Claude Code mod that watches pull requests in a pane.",
+  "owner": { "name": "Gergely Brautigam" },
+  "plugins": [{ "name": "pr-watcher", "source": "./" }]
+}
