@@ -1,4 +1,14 @@
+/** The newest comment, review or head commit of a PR: what a poll compares. */
+export type Mark = {
+  id: string
+  at: number
+  by: string | null
+  isBot: boolean
+  state?: string
+}
+
 export type Pr = {
+  id: string
   url: string
   repo: string
   number: number
@@ -9,6 +19,7 @@ export type Pr = {
   review: 'APPROVED' | 'CHANGES_REQUESTED' | 'REVIEW_REQUIRED' | null
   checks: 'SUCCESS' | 'FAILURE' | 'ERROR' | 'PENDING' | 'EXPECTED' | null
   updatedAt: number
+  latest: { comment: Mark | null; review: Mark | null; push: Mark | null }
 }
 
 export type Section = { prs: Pr[]; total: number }

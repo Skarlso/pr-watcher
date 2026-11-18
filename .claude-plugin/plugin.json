@@ -10,6 +10,12 @@
       "title": "Poll interval (seconds)",
       "description": "How often the pane asks GitHub for fresh data. 10 at least.",
       "default": 30
+    },
+    "notifications": {
+      "type": "boolean",
+      "title": "Notifications",
+      "description": "Raise a toast and a native notification when someone else comments on, reviews, pushes to, merges or closes a listed pull request, and when CI finishes on yours.",
+      "default": true
     }
   }
 }

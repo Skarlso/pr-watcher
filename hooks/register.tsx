@@ -2,9 +2,12 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
 import type { Board, Pr } from '../types'
+import { changes, departed, endings } from './events'
 import {
-  buildQuery,
+  buildLookup,
+  buildQueries,
   hide,
+  parseLookup,
   parseRef,
   parseReply,
   parseTarget,
@@ -35,7 +38,7 @@ const EMPTY: Board = {
 }
 // Change the tag when Board's fields change: a stored board outlives a reload.
 const board = atom({ plugin: 'pr-watcher', key: 'board' } as const, EMPTY, {
-  shape: 'board-2',
+  shape: 'board-3',
 })
 
 const CHECKS = {
@@ -76,28 +79,66 @@ const stringsAt = async ($: EngineInterface, key: string) => {
 const watchedRefs = async ($: EngineInterface): Promise<Ref[]> =>
   (await stringsAt($, WATCHED)).flatMap(one => parseRef(one) ?? [])
 
+const gh = ($: EngineInterface, query: string) =>
+  $.process.run(['gh', 'api', 'graphql', '-f', `query=${query}`], {
+    timeoutMs: 20_000,
+  })
+
+let isAnnouncing = true
+
+const announce = async ($: EngineInterface, events: readonly string[]) => {
+  const [first, ...rest] = events
+  if (first === undefined) return
+  $.ui.toast(rest.length ? `${first} (+${rest.length} more)` : first, {
+    timeoutMs: 8000,
+  })
+  await $.ui
+    .notify(events.slice(0, 5).join('\n'), { title: TITLE })
+    .catch(() => undefined)
+}
+
 const fetchBoard = async ($: EngineInterface) => {
   const refs = await watchedRefs($)
-  let lists: ReturnType<typeof parseReply>
+  let reply: ReturnType<typeof parseReply>
   try {
-    const ran = await $.process.run(
-      ['gh', 'api', 'graphql', '-f', `query=${buildQuery(refs)}`],
-      { timeoutMs: 20_000 },
+    const ran = await Promise.all(buildQueries(refs).map(query => gh($, query)))
+    reply = parseReply(
+      ran.map(one => one.stdout),
+      refs,
     )
-    lists = parseReply(ran.stdout, refs)
-    if (typeof lists === 'string') lists = firstLine(ran.stderr) || lists
+    if (typeof reply === 'string') {
+      reply = firstLine(ran.map(one => one.stderr).join('\n')) || reply
+    }
   } catch (error) {
-    lists = `gh did not run: ${error instanceof Error ? error.message : String(error)}`
+    reply = `gh did not run: ${error instanceof Error ? error.message : String(error)}`
   }
+  if (typeof reply === 'string') {
+    const error = reply
+    // A failed poll keeps the last good lists and their time.
+    await update($, board, held => ({ ...held, error }))
+
+    return
+  }
+  const { viewer, ...found } = reply
   const ignored = await stringsAt($, IGNORED)
+  const lists = hide(found, ignored)
+  const held = await read($, board)
   const fetchedAt = await $.clock.now()
-  const next = lists
-  // A failed poll keeps the last good lists and their time.
-  await update($, board, held =>
-    typeof next === 'string'
-      ? { ...held, error: next }
-      : { ...hide(next, ignored), ignored: ignored.length, fetchedAt, error: null },
-  )
+  await update($, board, () => ({
+    ...lists,
+    ignored: ignored.length,
+    fetchedAt,
+    error: null,
+  }))
+  // The first poll is the baseline: nothing to compare it with.
+  if (!isAnnouncing || held.fetchedAt === null) return
+  const events = changes(held, lists, viewer)
+  const ids = departed(held, lists)
+  if (ids.length > 0) {
+    const ran = await gh($, buildLookup(ids)).catch(() => undefined)
+    events.push(...endings(parseLookup(ran?.stdout ?? ''), viewer))
+  }
+  await announce($, events)
 }
 
 let queue: Promise<void> = Promise.resolve()
@@ -167,6 +208,7 @@ const dismiss = async ($: EngineInterface, pr: Pr, isWatched: boolean) => {
 
 export const register: Register = (on, options) => {
   const pollMs = Math.max(10, Number(options.pollSeconds) || 30) * 1000
+  isAnnouncing = options.notifications !== false
 
   on('session.start', async ($, e, next) => {
     if (!e.isInteractive) return next(e)

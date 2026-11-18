@@ -1,4 +1,4 @@
-import type { Board, Pr, Section } from '../types'
+import type { Board, Mark, Pr, Section } from '../types'
 
 export type Ref = { owner: string; repo: string; number: number }
 
@@ -27,30 +27,38 @@ export const parseTarget = (text: string): string | undefined => {
 }
 
 const FIELDS = `fragment F on PullRequest {
-  number title url isDraft state reviewDecision updatedAt
+  id number title url isDraft state reviewDecision updatedAt
   repository { nameWithOwner }
   author { login }
-  commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }
+  comments(last: 1) { nodes { id createdAt author { __typename login } } }
+  reviews(last: 1) { nodes { id state submittedAt author { __typename login } } }
+  commits(last: 1) { nodes { commit { oid committedDate author { user { login } } statusCheckRollup { state } } } }
 }`
 
 const search = (alias: string, filter: string) =>
   `${alias}: search(query: "is:pr is:open ${filter} sort:updated-desc", type: ISSUE, first: 30) { issueCount nodes { ...F } }`
 
-// Refs are inlined, not passed as variables: parseRef's pattern is what keeps them safe.
-export const buildQuery = (refs: readonly Ref[]) =>
+// Two requests, run side by side: GitHub runs a query's searches one after the
+// other, and both in one request come close to its ten second limit (a 502).
+// Refs are inlined, not passed as variables: parseRef's pattern keeps them safe.
+export const buildQueries = (refs: readonly Ref[]) => [
+  [FIELDS, 'query {', 'viewer { login }', search('mine', 'author:@me'), '}'].join('\n'),
   [
     FIELDS,
     'query {',
-    search('mine', 'author:@me'),
     search('reviews', 'review-requested:@me'),
     ...refs.map(
       (ref, i) =>
         `w${i}: repository(owner: "${ref.owner}", name: "${ref.repo}") { pullRequest(number: ${ref.number}) { ...F } }`,
     ),
     '}',
-  ].join('\n')
+  ].join('\n'),
+]
+
+type RawActor = { __typename?: string; login?: string } | null
 
 type RawPr = {
+  id?: string
   number?: number
   title?: string
   url?: string
@@ -60,22 +68,54 @@ type RawPr = {
   updatedAt?: string
   repository?: { nameWithOwner?: string }
   author?: { login?: string } | null
+  comments?: { nodes?: { id?: string; createdAt?: string; author?: RawActor }[] }
+  reviews?: {
+    nodes?: { id?: string; state?: string; submittedAt?: string | null; author?: RawActor }[]
+  }
   commits?: {
-    nodes?: { commit?: { statusCheckRollup?: { state?: Pr['checks'] } | null } }[]
+    nodes?: {
+      commit?: {
+        oid?: string
+        committedDate?: string
+        author?: { user?: { login?: string } | null } | null
+        statusCheckRollup?: { state?: Pr['checks'] } | null
+      }
+    }[]
   }
 }
 
+const toMark = (
+  id: string | undefined,
+  at: string | null | undefined,
+  actor: RawActor | undefined,
+  state?: string,
+): Mark | null =>
+  id
+    ? {
+        id,
+        at: Date.parse(at ?? '') || 0,
+        by: actor?.login ?? null,
+        isBot: actor?.__typename === 'Bot',
+        ...(state ? { state } : {}),
+      }
+    : null
+
 type RawSearch = { issueCount?: number; nodes?: (RawPr | null)[] }
 
-type Reply = {
-  data?: Record<string, RawSearch | { pullRequest?: RawPr | null } | null>
-  errors?: { message?: string }[]
+type Data = Record<string, RawSearch | { pullRequest?: RawPr | null } | null> & {
+  viewer?: { login?: string }
 }
+
+type Reply = { data?: Data; errors?: { message?: string }[] }
 
 const toPr = (raw: RawPr | null | undefined): Pr | undefined => {
   if (!raw?.url || raw.number === undefined) return undefined
+  const comment = raw.comments?.nodes?.[0]
+  const review = raw.reviews?.nodes?.[0]
+  const head = raw.commits?.nodes?.[0]?.commit
 
   return {
+    id: raw.id ?? '',
     url: raw.url,
     repo: raw.repository?.nameWithOwner ?? '',
     number: raw.number,
@@ -84,8 +124,13 @@ const toPr = (raw: RawPr | null | undefined): Pr | undefined => {
     isDraft: raw.isDraft ?? false,
     state: raw.state ?? 'OPEN',
     review: raw.reviewDecision ?? null,
-    checks: raw.commits?.nodes?.[0]?.commit?.statusCheckRollup?.state ?? null,
+    checks: head?.statusCheckRollup?.state ?? null,
     updatedAt: Date.parse(raw.updatedAt ?? '') || 0,
+    latest: {
+      comment: toMark(comment?.id, comment?.createdAt, comment?.author),
+      review: toMark(review?.id, review?.submittedAt, review?.author, review?.state),
+      push: toMark(head?.oid, head?.committedDate, head?.author?.user),
+    },
   }
 }
 
@@ -117,17 +162,23 @@ export const hide = <T extends Lists>(lists: T, ignored: readonly string[]): T =
   }
 }
 
-/** Reads gh's reply; a string is the reason there is no board to show. */
-export const parseReply = (stdout: string, refs: readonly Ref[]): Lists | string => {
-  let reply: Reply
+/** Reads gh's replies to buildQueries; a string is the reason there is no board to show. */
+export const parseReply = (
+  stdouts: readonly string[],
+  refs: readonly Ref[],
+): (Lists & { viewer: string }) | string => {
+  let replies: Reply[]
   try {
-    reply = JSON.parse(stdout) as Reply
+    replies = stdouts.map(stdout => JSON.parse(stdout) as Reply)
   } catch {
     return 'gh answered something that is not JSON'
   }
-  const { data, errors } = reply
+  const data: Data = Object.assign({}, ...replies.map(reply => reply.data))
+  const errors = replies.flatMap(reply => reply.errors ?? [])
   // A watched PR that is gone answers an error too, beside data that is whole.
-  if (!data?.mine) return errors?.[0]?.message ?? 'gh answered no data'
+  if (!data.mine || !data.reviews) {
+    return errors[0]?.message ?? 'gh answered no data'
+  }
 
   const mine = toSection(data.mine)
   const reviews = toSection(data.reviews)
@@ -141,5 +192,38 @@ export const parseReply = (stdout: string, refs: readonly Ref[]): Lists | string
     else if (!listed.has(pr.url)) watched.push(pr)
   })
 
-  return { mine, reviews, watched, missing }
+  return { mine, reviews, watched, missing, viewer: data.viewer?.login ?? '' }
+}
+
+export type Ending = { pr: Pr; state: Pr['state']; by: string | null }
+
+export const buildLookup = (ids: readonly string[]) =>
+  `query { nodes(ids: ${JSON.stringify(ids)}) { ...F ... on PullRequest {
+  mergedBy { login }
+  timelineItems(last: 1, itemTypes: [CLOSED_EVENT]) { nodes { ... on ClosedEvent { actor { login } } } }
+} } }
+${FIELDS}`
+
+type RawEnding = RawPr & {
+  mergedBy?: { login?: string } | null
+  timelineItems?: { nodes?: ({ actor?: { login?: string } | null } | null)[] }
+}
+
+/** How the PRs a lookup asked about ended; one still open is left out. */
+export const parseLookup = (stdout: string): Ending[] => {
+  let nodes: (RawEnding | null)[]
+  try {
+    nodes = (JSON.parse(stdout) as { data?: { nodes?: (RawEnding | null)[] } }).data?.nodes ?? []
+  } catch {
+    return []
+  }
+
+  return nodes.flatMap(raw => {
+    const pr = toPr(raw)
+    if (!pr || pr.state === 'OPEN') return []
+    const closer = raw?.timelineItems?.nodes?.[0]?.actor?.login
+    const by = pr.state === 'MERGED' ? raw?.mergedBy?.login : closer
+
+    return { pr, state: pr.state, by: by ?? null }
+  })
 }

@@ -53,9 +53,22 @@ The `✕` at the start of a row's second line ignores that row. On a Watching ro
 
 The watch list and the ignore list are kept across sessions.
 
+## Notifications
+
+Between two polls the mod compares each listed pull request with what it saw before. It raises a toast and a native notification when someone else:
+
+- comments on it,
+- reviews it (approves, requests changes or leaves review comments),
+- pushes to it,
+- merges or closes it.
+
+It also says when CI passes or fails on your own and your watched pull requests.
+
+Your own activity, bots' comments, reviews and pushes, and ignored pull requests raise nothing. Switch it all off with the `notifications` option in `/config`.
+
 ## Polling
 
-The mod polls every 30 seconds while the pane is on screen. Change it with the `pollSeconds` option in `/config` (10 at least). One poll is one GraphQL request, which GitHub counts as 1 point of the 5000 an hour a signed-in user has.
+The mod polls every 30 seconds while the pane is on screen. Change it with the `pollSeconds` option in `/config` (10 at least). One poll is two GraphQL requests, which GitHub counts as 1 point each of the 5000 an hour a signed-in user has.
 
 Each of the first two lists has up to 30 pull requests, sorted by most recently updated.
 
