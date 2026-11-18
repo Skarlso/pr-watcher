@@ -8,6 +8,8 @@ A Claude Code mod that keeps a pane of pull requests beside the chat. There are 
 
 Each row shows the CI state (`✓` passed, `✗` failed, `●` running), the title as a link, the repository and number, the review state and the time since the last update.
 
+![showcase](./imgs/showcase.png)
+
 ## Requirements
 
 The mod reads GitHub through the [GitHub CLI](https://cli.github.com). `gh` must be installed and signed in (`gh auth status`).
@@ -46,6 +48,8 @@ The pane opens by itself in a terminal of 144 columns or more. `/prs` opens it a
 | `/prs ignored` | List what is ignored |
 
 The `✕` at the start of a row's second line ignores that row. On a Watching row it stops watching instead.
+
+![ignoreing pull requests](./imgs/ignore.png)
 
 The watch list and the ignore list are kept across sessions.
 
